@@ -1,3 +1,7 @@
+# backtesting 
+# buy after 5 consecitive red candle 
+# sell after 5 consecutive green candle 
+
 import requests
 import pandas as pd
 from datetime import datetime 
@@ -30,7 +34,7 @@ def fetch_binance_data(symbol, startTime=None):
             response = requests.get(url)
             if response.status_code == 200:
                 data = response.json()
-                startTime = data[-1][6] + 1  # 更新 startTime 为下一个时间段
+                startTime = data[-1][6] + 1  # update startTime 
                 temp = pd.DataFrame(data)
                 df = pd.concat([df, temp], ignore_index=True)
                 if len(data) < 1500:
@@ -46,7 +50,6 @@ def fetch_binance_data(symbol, startTime=None):
         else:
             raise Exception(f"Error fetching data: {response.status_code}, {response.text}")
     
-    # 定义 DataFrame 列
     df.columns = [
         'time', 'open', 'high', 'low', 'close', 'volume',
         'close_time', 'quote_asset_volume', 'number_of_trades',
@@ -56,13 +59,14 @@ def fetch_binance_data(symbol, startTime=None):
     df.set_index('time', inplace=True)
     df = df[['open', 'high', 'low', 'close']].astype(float)
     
-    # 定义 candle 列
+    # define up or down candle 
+    # close > open -> 1 , else -1 
     def candle(row):
         return 1 if row['close'] > row['open'] else -1
 
     df['candle'] = df.apply(candle, axis=1)
     
-    # 计算连续上涨或下跌的次数
+    # count consecutive up or down candles  
     df['count'] = (df['candle'] != df['candle'].shift()).cumsum()
     df['count'] = df.groupby('count').cumcount() + 1
     
@@ -72,20 +76,21 @@ principal = 10000
 
 def backtest_strategy(data, principal=principal, order_size=500, return_rate=0.8, hold_minutes=10,consecutive_candles=5):
     """Run the backtest based on the given strategy."""
-    signals = []  # 保存交易信号
-    balance = principal  # 初始本金
+    signals = []  # save signals 
+    balance = principal  # initiate balance 
     
     for i in range(len(data) - hold_minutes):
-        # 当前行的 candle 和 count 值
+
+        # get current row's candle and count 
         candle = data['candle'].iloc[i]
         count = data['count'].iloc[i]
         
-        # 触发条件：SELL
+        # sell at 5 consecutive up candles
         if candle == 1 and count == consecutive_candles:
             open_time = data.index[i]
-            entry_price = data['close'].iloc[i]  # 卖出价格
-            close_price = data['close'].iloc[i + hold_minutes]  # 10 分钟后买入平仓价格
-            result = "WIN" if close_price < entry_price else "LOSS"  # 比较价格
+            entry_price = data['close'].iloc[i]  # log sell price 
+            close_price = data['close'].iloc[i + hold_minutes]  # log close price after 10 minute 
+            result = "WIN" if close_price < entry_price else "LOSS"  # price comparision 
             profit_or_loss = order_size * return_rate if result == "WIN" else -order_size
             balance += profit_or_loss
             signals.append({
@@ -97,12 +102,12 @@ def backtest_strategy(data, principal=principal, order_size=500, return_rate=0.8
                 "balance": balance
             })
         
-        # 触发条件：BUY
+        # buy at 5 consecutive down candles
         elif candle == -1 and count == consecutive_candles:
             open_time = data.index[i]
-            entry_price = data['close'].iloc[i]  # 买入价格
-            close_price = data['close'].iloc[i + hold_minutes]  # 10 分钟后卖出平仓价格
-            result = "WIN" if close_price > entry_price else "LOSS"  # 比较价格
+            entry_price = data['close'].iloc[i]  # log buy price 
+            close_price = data['close'].iloc[i + hold_minutes] # log close price after 10 minute 
+            result = "WIN" if close_price > entry_price else "LOSS" # price comparision 
             profit_or_loss = order_size * return_rate if result == "WIN" else -order_size
             balance += profit_or_loss
             signals.append({
@@ -118,28 +123,35 @@ def backtest_strategy(data, principal=principal, order_size=500, return_rate=0.8
 
 
 
-# if __name__ == "__main__":
 
-
-# 获取 K 线数据
+# fetch Kline data 
 print("Fetching data from Binance...")
 kline_data = fetch_binance_data('BTCUSDT','2025-01-24 00:00:00')
 
-# 回测策略
+# backtesting strategy 
 print("Running backtest...")
 signals, final_balance = backtest_strategy(kline_data)
 
-# 打印结果
+# print
 print(f"Initial Balance: {principal}")
 print(f"Final Balance: {final_balance}")
-# for signal in signals[:]:  # 打印前 10 个交易信号
-#     print(signal)
 df = pd.DataFrame(signals)
 df.insert(3,'close_time',df['open_time']+pd.Timedelta(minutes=10))
 ret = df.value_counts(subset='result').to_dict()
 ret['win_ratio'] = round(ret['WIN']/(ret['WIN']+ret['LOSS']),4)
 ret['count']  = ret['WIN']+ret['LOSS']
 df['win_ratio'] = df.apply(lambda x:1 if x['result']=='WIN' else 0,axis=1).cumsum() / (df.index+1)
+
+df['group'] = (df['result'] != df['result'].shift()).cumsum()
+
+# group: group  consecutive  WIN or LOSS 
+group_counts = df.groupby(['group', 'result']).size().reset_index(name='count')
+# count every group len 
+
+win_loss_streaks = group_counts.groupby('result')['count'].max().to_dict()
+ret['consecutive_win'] = win_loss_streaks['WIN']
+ret['consecutive_loss'] = win_loss_streaks['LOSS']
+
 
 def pnl(row,order_size=500,return_rate=0.8):
     if row['result'] == 'WIN':
@@ -162,7 +174,7 @@ fig = make_subplots(
     specs=[[{'secondary_y':False}],[{'secondary_y':True}],[{'secondary_y':True}]],
     vertical_spacing=0.1,
     row_heights= [0.2,0.6,0.2],
-    subplot_titles=["Balance Curve", "Candlestick Chart with PnL", "Win Ratio and Trade Count"]
+    subplot_titles=["Balance", "Price Chart & PnL", "Win Ratio & Trade Count"]
     )
     # subplot_titles=('Balance Curve','Win Ratio Curve'))
     
@@ -174,7 +186,8 @@ fig.add_trace(
                                 open=kline_data['open'],
                                 high=kline_data['high'],
                                 low=kline_data['low'],
-                                close=kline_data['close'],          
+                                close=kline_data['close'], 
+                                name='BTCUSDT index_price'         
                              ),row=2,col=1
               )
 
@@ -188,7 +201,7 @@ fig.add_trace(go.Scatter(
                          ),row=2,col=1)
 
 fig.add_trace(go.Scatter( 
-                       x=short['open_time'],y=short['entry_price'],name='LONG',mode='markers',marker=dict(color='red',size=10,symbol='triangle-down')
+                       x=short['open_time'],y=short['entry_price'],name='SHORT',mode='markers',marker=dict(color='red',size=10,symbol='triangle-down')
                          ),row=2,col=1)
 
 fig.add_trace(go.Bar(x=win['open_time'],y=win['pnl'],name='WIN',marker=dict(color='green',opacity=0.5)),row=2,col=1,secondary_y=True)
@@ -199,26 +212,30 @@ fig.add_trace(go.Scatter(x=df['open_time'],y=df.index+1,name='trade cnt',mode='l
 
 
 
-fig.update_xaxes(title_text="Time", row=1, col=1)  # 共享 X 轴
-fig.update_xaxes(title_text="Time", row=2, col=1)  # 共享 X 轴
-fig.update_xaxes(title_text="Time", row=3, col=1)  # 共享 X 轴
-# fig.update_xaxes(title_text="Timestamp", tickformat="%Y-%m-%d %H:%M",row=2, col=1)  # 共享 X 轴
+fig.update_xaxes( row=1, col=1) 
+fig.update_xaxes( row=2, col=1) 
+fig.update_xaxes(title_text="Time", row=3, col=1)  
+
 
 
 fig.update_yaxes(title_text="Balance", row=1, col=1)
 fig.update_yaxes(title_text="Price", row=2, col=1, secondary_y=False)
-fig.update_yaxes(title_text="PNL", row=2, col=1, secondary_y=True)
+fig.update_yaxes(range=[-1000, 1000],title_text="PNL", row=2, col=1, secondary_y=True)
+
+
+
 fig.update_yaxes(title_text="trades_cnt", row=3, col=1, secondary_y=False)
 fig.update_yaxes(title_text="win_ratio", row=3, col=1, secondary_y=True)
 
 fig.update_layout(xaxis_rangeslider_visible=False)
 fig.update_layout(
     height=700,
-    width=1500,
+    width=1600,
     showlegend=True,
+    hovermode = 'x unified'
 )
 
 fig.update_xaxes(rangeslider_visible=False)
 
-
 fig.show()
+fig.write_html('backtesting.html')
